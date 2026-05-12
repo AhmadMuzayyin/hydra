@@ -6,6 +6,7 @@ import { MobileLayout } from "@/components/mobile-layout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { saveSettingAction } from "@/app/actions";
 
 type SettingsShape = Record<string, unknown>;
@@ -28,6 +29,22 @@ type InfoDraft = {
   location: string;
 };
 
+type TankDraft = {
+  level_min_cm: number;
+  level_full_cm: number;
+  buzzer_enabled: boolean;
+  tank_height_cm: number;
+  pump_on_threshold: number;
+  pump_off_threshold: number;
+  valve_open_threshold: number;
+};
+
+type TelemetryDraft = {
+  retention_days: number;
+  poll_interval_sec: number;
+  telemetry_interval_sec: number;
+};
+
 export function PengaturanClient({
   userRole,
   settings,
@@ -38,10 +55,14 @@ export function PengaturanClient({
   const initialMqtt = useMemo(() => mergeMqtt(settings), [settings]);
   const initialWifi = useMemo(() => mergeWifi(settings), [settings]);
   const initialInfo = useMemo(() => mergeInfo(settings), [settings]);
+  const initialTank = useMemo(() => mergeTank(settings), [settings]);
+  const initialTelemetry = useMemo(() => mergeTelemetry(settings), [settings]);
 
   const [mqtt, setMqtt] = useState<MqttDraft>(initialMqtt);
   const [wifi, setWifi] = useState<WifiDraft>(initialWifi);
   const [info, setInfo] = useState<InfoDraft>(initialInfo);
+  const [tank, setTank] = useState<TankDraft>(initialTank);
+  const [telemetry, setTelemetry] = useState<TelemetryDraft>(initialTelemetry);
 
   const isAdmin = userRole === "admin" || !userRole;
 
@@ -148,6 +169,129 @@ export function PengaturanClient({
           </Button>
         ) : null}
       </Section>
+
+      <Section icon={<Cpu className="h-5 w-5" />} title="Tangki">
+        <div className="grid grid-cols-2 gap-3">
+          <Field
+            label="Level Minimum (cm)"
+            value={String(tank.level_min_cm)}
+            onChange={(value) =>
+              setTank({ ...tank, level_min_cm: Number(value) || 0 })
+            }
+            disabled={!isAdmin}
+            type="number"
+          />
+          <Field
+            label="Level Penuh (cm)"
+            value={String(tank.level_full_cm)}
+            onChange={(value) =>
+              setTank({ ...tank, level_full_cm: Number(value) || 0 })
+            }
+            disabled={!isAdmin}
+            type="number"
+          />
+          <Field
+            label="Tinggi Tangki (cm)"
+            value={String(tank.tank_height_cm)}
+            onChange={(value) =>
+              setTank({ ...tank, tank_height_cm: Number(value) || 0 })
+            }
+            disabled={!isAdmin}
+            type="number"
+          />
+          <Field
+            label="Threshold Pompa ON"
+            value={String(tank.pump_on_threshold)}
+            onChange={(value) =>
+              setTank({ ...tank, pump_on_threshold: Number(value) || 0 })
+            }
+            disabled={!isAdmin}
+            type="number"
+          />
+          <Field
+            label="Threshold Pompa OFF"
+            value={String(tank.pump_off_threshold)}
+            onChange={(value) =>
+              setTank({ ...tank, pump_off_threshold: Number(value) || 0 })
+            }
+            disabled={!isAdmin}
+            type="number"
+          />
+          <Field
+            label="Threshold Valve Buka"
+            value={String(tank.valve_open_threshold)}
+            onChange={(value) =>
+              setTank({ ...tank, valve_open_threshold: Number(value) || 0 })
+            }
+            disabled={!isAdmin}
+            type="number"
+          />
+        </div>
+        <div className="flex items-center justify-between rounded-xl border border-border px-3 py-2">
+          <Label>Buzzer Aktif</Label>
+          <Switch
+            checked={tank.buzzer_enabled}
+            onCheckedChange={(value) =>
+              setTank({ ...tank, buzzer_enabled: value })
+            }
+            disabled={!isAdmin}
+          />
+        </div>
+        {isAdmin ? (
+          <Button
+            onClick={() => doSave("tank_config", tank)}
+            className="mt-2 w-full"
+          >
+            Simpan Tangki
+          </Button>
+        ) : null}
+      </Section>
+
+      <Section icon={<Radio className="h-5 w-5" />} title="Telemetry">
+        <div className="grid grid-cols-3 gap-3">
+          <Field
+            label="Retention (hari)"
+            value={String(telemetry.retention_days)}
+            onChange={(value) =>
+              setTelemetry({ ...telemetry, retention_days: Number(value) || 0 })
+            }
+            disabled={!isAdmin}
+            type="number"
+          />
+          <Field
+            label="Polling (detik)"
+            value={String(telemetry.poll_interval_sec)}
+            onChange={(value) =>
+              setTelemetry({
+                ...telemetry,
+                poll_interval_sec: Number(value) || 0,
+              })
+            }
+            disabled={!isAdmin}
+            type="number"
+          />
+          <Field
+            label="Telemetry (detik)"
+            value={String(telemetry.telemetry_interval_sec)}
+            onChange={(value) =>
+              setTelemetry({
+                ...telemetry,
+                telemetry_interval_sec: Number(value) || 0,
+              })
+            }
+            disabled={!isAdmin}
+            type="number"
+          />
+        </div>
+        {isAdmin ? (
+          <Button
+            onClick={() => doSave("telemetry_config", telemetry)}
+            className="mt-2 w-full"
+          >
+            Simpan Telemetry
+          </Button>
+        ) : null}
+      </Section>
     </MobileLayout>
   );
 }
@@ -176,6 +320,28 @@ function mergeInfo(settings: SettingsShape): InfoDraft {
   return {
     name: String(source.name ?? ""),
     location: String(source.location ?? ""),
+  };
+}
+
+function mergeTank(settings: SettingsShape): TankDraft {
+  const source = coerceRecord(settings.tank_config);
+  return {
+    level_min_cm: Number(source.level_min_cm ?? 30) || 30,
+    level_full_cm: Number(source.level_full_cm ?? 180) || 180,
+    buzzer_enabled: Boolean(source.buzzer_enabled ?? true),
+    tank_height_cm: Number(source.tank_height_cm ?? 200) || 200,
+    pump_on_threshold: Number(source.pump_on_threshold ?? 50) || 50,
+    pump_off_threshold: Number(source.pump_off_threshold ?? 180) || 180,
+    valve_open_threshold: Number(source.valve_open_threshold ?? 190) || 190,
+  };
+}
+
+function mergeTelemetry(settings: SettingsShape): TelemetryDraft {
+  const source = coerceRecord(settings.telemetry_config);
+  return {
+    retention_days: Number(source.retention_days ?? 30) || 30,
+    poll_interval_sec: Number(source.poll_interval_sec ?? 5) || 5,
+    telemetry_interval_sec: Number(source.telemetry_interval_sec ?? 10) || 10,
   };
 }
 
