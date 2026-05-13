@@ -346,7 +346,7 @@ export function JadwalClient({
             <div className="flex items-start justify-between gap-3">
               <div className="flex min-w-0 items-center gap-3">
                 <div className="grid h-12 w-12 shrink-0 place-items-center rounded-xl bg-[var(--gradient-primary)] text-primary-foreground">
-                  <Clock className="h-6 w-6" />
+                  <Clock className="h-6 w-6 text-white" />
                 </div>
                 <div className="min-w-0">
                   <p className="truncate font-semibold">
@@ -467,7 +467,7 @@ export function JadwalClient({
                   }
                 }}
               >
-                <Trash2 className="h-4 w-4" />
+                <Trash2 className="h-4 w-4 text-destructive" />
               </Button>
             </div>
           </div>

@@ -7,8 +7,8 @@
 #include <vector>
 
 // ===== WIFI & MQTT =====
-const char *WIFI_SSID = "USTDEV";
-const char *WIFI_PASSWORD = "coba12345";
+String WIFI_SSID = "USTDEV";
+String WIFI_PASSWORD = "coba12345";
 
 const char *MQTT_HOST = "d8e662e1.ala.asia-southeast1.emqxsl.com";
 const uint16_t MQTT_PORT = 8883;
@@ -17,6 +17,20 @@ const char *MQTT_PASSWORD = "Mocachino18@";
 
 const char *DEVICE_PREFIX = "tandon";
 const char *DEVICE_UUID = "esp-hydra-001";
+
+// ===== RUNTIME CONFIG (persisted) =====
+// primary tank (tangki) defaults
+int tank_height_cm = 200;
+int level_min_cm = 30;
+int pump_on_threshold = 50;
+int pump_off_threshold = 180;
+int valve_open_threshold = 190;
+int level_full_primary_cm = 20; // threshold for 100% primary tank (pump auto-off)
+bool buzzer_enabled = true;
+
+// secondary tank (bak mandi) defaults
+int tank_height_secondary_cm = 100;
+int level_full_secondary_cm = 90; // threshold for 100% secondary tank (valve auto-off)
 
 // ===== PIN ESP8266 =====
 // Relay (active LOW)
@@ -41,7 +55,8 @@ const int LED_RED2_PIN = 3;   // GPIO1 - TX pin
 const uint8_t BUZZER_PIN = D8;
 
 const bool RELAY_ACTIVE_LOW = true;
-const bool LED_ACTIVE_LOW = false;
+const bool LED_GREEN_ACTIVE_LOW = true;
+const bool LED_RED_ACTIVE_LOW = false;
 const bool BUZZER_ACTIVE_HIGH = true;
 
 using SecureClientType = BearSSL::WiFiClientSecure;
@@ -53,8 +68,11 @@ struct
 {
     bool pumpOn = false;
     bool valveOn = false;
-    uint16_t levelPrimaryCm = 0;
-    bool levelMinTriggered = false;
+    uint16_t levelPrimaryCm = 0;     // distance from primary sensor (tangki)
+    uint16_t levelSecondaryCm = 0;   // distance from secondary sensor (bak mandi)
+    bool levelPrimaryFull = false;   // primary tank at 100%
+    bool levelSecondaryFull = false; // secondary tank at 100%
+    bool levelMinTriggered = false;  // alert for low level (obsolete, kept for compat)
     uint16_t pumpRuntimeSec = 0;
     uint16_t valveRuntimeSec = 0;
     uint32_t uptimeSec = 0;
@@ -69,10 +87,11 @@ unsigned long buzzerOffAtMs = 0; // Buzzer auto-off timer
 unsigned long lastScheduleCheckMs = 0;
 const unsigned long SCHEDULE_CHECK_INTERVAL_MS = 60000; // check schedules every 60s
 
-const unsigned long POLL_SENSOR_INTERVAL_MS = 5000; // Poll sensor setiap 5s
-const unsigned long TELEMETRY_INTERVAL_MS = 10000;  // Publish telemetry setiap 10s
+const unsigned long POLL_SENSOR_INTERVAL_MS = 3000; // Poll sensor setiap 3s
+const unsigned long TELEMETRY_INTERVAL_MS = 5000;   // Publish telemetry setiap 5s
 const unsigned long RECONNECT_INTERVAL_MS = 5000;   // Reconnect attempt setiap 5s
 const char *NTP_SERVER = "pool.ntp.org";
+bool startupWifiPending = true;
 
 // ===== TIMEZONE =====
 // WIB = UTC+7 (Waktu Indonesia Barat)
@@ -105,34 +124,109 @@ void updateBuzzer()
     }
 }
 
-void setPump(bool on)
+void writeAllLeds(bool on)
+{
+    writeGreenLed(LED_GREEN1_PIN, on);
+    writeRedLed(LED_RED1_PIN, on);
+    if (ENABLE_UART_LED_PINS)
+    {
+        writeGreenLed(LED_GREEN2_PIN, on);
+        writeRedLed(LED_RED2_PIN, on);
+    }
+}
+
+void beepBlocking(unsigned int durationMs)
+{
+    digitalWrite(BUZZER_PIN, BUZZER_ACTIVE_HIGH ? HIGH : LOW);
+    delay(durationMs);
+    digitalWrite(BUZZER_PIN, BUZZER_ACTIVE_HIGH ? LOW : HIGH);
+}
+
+void beepLongTripleBlocking()
+{
+    for (int i = 0; i < 3; i++)
+    {
+        beepBlocking(600);
+        delay(250);
+    }
+}
+
+void runFullLevelAlarm(bool isPump)
+{
+    for (int i = 0; i < 3; i++)
+    {
+        if (isPump)
+        {
+            writeGreenLed(LED_GREEN1_PIN, true);
+            writeRedLed(LED_RED1_PIN, false);
+        }
+        else
+        {
+            writeGreenLed(LED_GREEN2_PIN, true);
+            writeRedLed(LED_RED2_PIN, false);
+        }
+
+        beepBlocking(600);
+
+        if (isPump)
+        {
+            writeGreenLed(LED_GREEN1_PIN, false);
+        }
+        else
+        {
+            writeGreenLed(LED_GREEN2_PIN, false);
+        }
+
+        delay(250);
+    }
+}
+
+void setPump(bool on, bool withBeep = true)
 {
     if (state.pumpOn == on)
+        return;
+    // Don't turn on pump if primary tank is already full
+    if (on && state.levelPrimaryFull)
         return;
     state.pumpOn = on;
     writeRelay(RELAY_PUMP_PIN, on);
     if (on)
         pumpStartMs = millis();
-    beepBuzzer(150); // Beep 150ms saat pompa berubah state
+    if (withBeep)
+        beepBuzzer(150);
     updateLeds();
 }
 
-void setValve(bool on)
+void setValve(bool on, bool withBeep = true)
 {
     if (state.valveOn == on)
+        return;
+    // Don't turn on valve if secondary tank is already full
+    if (on && state.levelSecondaryFull)
         return;
     state.valveOn = on;
     writeRelay(RELAY_VALVE_PIN, on);
     if (on)
         valveStartMs = millis();
-    beepBuzzer(150); // Beep 150ms saat valve berubah state
+    if (withBeep)
+        beepBuzzer(150);
     updateLeds();
 }
 
 // ===== LED CONTROL =====
-void writeLed(uint8_t pin, bool on)
+void writeLedRaw(uint8_t pin, bool on, bool activeLow)
 {
-    digitalWrite(pin, LED_ACTIVE_LOW ? (on ? LOW : HIGH) : (on ? HIGH : LOW));
+    digitalWrite(pin, activeLow ? (on ? LOW : HIGH) : (on ? HIGH : LOW));
+}
+
+void writeGreenLed(uint8_t pin, bool on)
+{
+    writeLedRaw(pin, on, LED_GREEN_ACTIVE_LOW);
+}
+
+void writeRedLed(uint8_t pin, bool on)
+{
+    writeLedRaw(pin, on, LED_RED_ACTIVE_LOW);
 }
 
 void updateLeds()
@@ -141,14 +235,14 @@ void updateLeds()
     bool blink = (now / 1000) % 2 == 0;
 
     bool relay1On = state.pumpOn;
-    writeLed(LED_GREEN1_PIN, relay1On && blink);
-    writeLed(LED_RED1_PIN, !relay1On);
+    writeGreenLed(LED_GREEN1_PIN, relay1On && blink);
+    writeRedLed(LED_RED1_PIN, !relay1On);
 
     if (ENABLE_UART_LED_PINS)
     {
         bool relay2On = state.valveOn;
-        writeLed(LED_GREEN2_PIN, relay2On && blink);
-        writeLed(LED_RED2_PIN, !relay2On);
+        writeGreenLed(LED_GREEN2_PIN, relay2On && blink);
+        writeRedLed(LED_RED2_PIN, !relay2On);
     }
 }
 
@@ -171,17 +265,33 @@ uint16_t readUltrasonicCm(uint8_t trigPin, uint8_t echoPin)
 
 void pollSensors()
 {
-    // Read primary level sensor
+    // Read primary level sensor (tangki)
     uint16_t levelPrimary = readUltrasonicCm(TRIG_PRIMARY_PIN, ECHO_PRIMARY_PIN);
     if (levelPrimary > 0 && levelPrimary < 300)
     { // Valid range 0-300cm
         state.levelPrimaryCm = levelPrimary;
+        // Calculate height: H = tank_height_cm - distance
+        uint16_t heightPrimary = 0;
+        if (levelPrimary <= (uint16_t)tank_height_cm)
+            heightPrimary = tank_height_cm - levelPrimary;
+        // Detect if primary tank is at/above full level
+        state.levelPrimaryFull = (heightPrimary >= (uint16_t)level_full_primary_cm);
     }
 
-    // Read minimum level sensor
-    uint16_t levelMin = readUltrasonicCm(TRIG_MIN_PIN, ECHO_MIN_PIN);
-    bool minTriggered = (levelMin > 0 && levelMin < 50); // Threshold: <50cm = triggered
-    state.levelMinTriggered = minTriggered;
+    // Read secondary level sensor (bak mandi)
+    uint16_t levelSecondary = readUltrasonicCm(TRIG_MIN_PIN, ECHO_MIN_PIN);
+    if (levelSecondary > 0 && levelSecondary < 300)
+    { // Valid range 0-300cm
+        state.levelSecondaryCm = levelSecondary;
+        // Calculate height: H = tank_height_secondary_cm - distance
+        uint16_t heightSecondary = 0;
+        if (levelSecondary <= (uint16_t)tank_height_secondary_cm)
+            heightSecondary = tank_height_secondary_cm - levelSecondary;
+        // Detect if secondary tank is at/above full level
+        state.levelSecondaryFull = (heightSecondary >= (uint16_t)level_full_secondary_cm);
+        // Keep levelMinTriggered for backward compat: trigger on low level in secondary
+        state.levelMinTriggered = (heightSecondary > 0 && heightSecondary < (uint16_t)level_min_cm);
+    }
 }
 
 void publishLevelSensor()
@@ -190,13 +300,45 @@ void publishLevelSensor()
         return;
 
     StaticJsonDocument<128> doc;
-    doc["level_cm"] = state.levelPrimaryCm;
-    doc["level_pct"] = (state.levelPrimaryCm * 100) / 200; // Assume tank height 200cm
+    // Calculate water height H from measured distance S
+    uint16_t heightCm = 0;
+    if (state.levelPrimaryCm > 0 && state.levelPrimaryCm <= (uint16_t)tank_height_cm)
+    {
+        heightCm = tank_height_cm - state.levelPrimaryCm; // H in cm
+    }
+    // Publish both distance (S) and height (H) for compatibility
+    doc["distance_cm"] = state.levelPrimaryCm; // S
+    doc["level_cm"] = heightCm;                // H
+    doc["level_pct"] = (heightCm * 100) / tank_height_cm;
     doc["timestamp"] = String(millis() / 1000);
 
     char payload[256];
     size_t len = serializeJson(doc, payload, sizeof(payload));
     String topic = String(DEVICE_PREFIX) + "/level/sensor";
+    mqttClient.publish(topic.c_str(), (const uint8_t *)payload, len, false);
+}
+
+void publishLevelSensor2()
+{
+    if (!mqttClient.connected())
+        return;
+
+    StaticJsonDocument<128> doc;
+    // Calculate water height H from measured distance S for secondary tank
+    uint16_t heightCm = 0;
+    if (state.levelSecondaryCm > 0 && state.levelSecondaryCm <= (uint16_t)tank_height_secondary_cm)
+    {
+        heightCm = tank_height_secondary_cm - state.levelSecondaryCm; // H in cm
+    }
+    // Publish both distance (S) and height (H) for compatibility
+    doc["distance_cm"] = state.levelSecondaryCm; // S
+    doc["level_cm"] = heightCm;                  // H
+    doc["level_pct"] = (heightCm * 100) / tank_height_secondary_cm;
+    doc["timestamp"] = String(millis() / 1000);
+
+    char payload[256];
+    size_t len = serializeJson(doc, payload, sizeof(payload));
+    String topic = String(DEVICE_PREFIX) + "/level/sensor2";
     mqttClient.publish(topic.c_str(), (const uint8_t *)payload, len, false);
 }
 
@@ -206,8 +348,12 @@ void publishMinimumAlert()
         return;
 
     StaticJsonDocument<128> doc;
+    // report triggered status and actual height (H)
     doc["triggered"] = state.levelMinTriggered;
-    doc["level_cm"] = state.levelPrimaryCm;
+    uint16_t heightCm = 0;
+    if (state.levelPrimaryCm > 0 && state.levelPrimaryCm <= (uint16_t)tank_height_cm)
+        heightCm = tank_height_cm - state.levelPrimaryCm;
+    doc["level_cm"] = heightCm;
     doc["timestamp"] = String(millis() / 1000);
 
     char payload[256];
@@ -248,9 +394,26 @@ void publishTelemetry()
     doc["device_uuid"] = DEVICE_UUID;
 
     JsonObject level = doc.createNestedObject("level");
-    level["primary_cm"] = state.levelPrimaryCm;
-    level["primary_pct"] = (state.levelPrimaryCm * 100) / 200;
-    level["min_triggered"] = state.levelMinTriggered;
+
+    // Primary sensor (tangki)
+    JsonObject levelPrimary = level.createNestedObject("primary");
+    uint16_t heightPrimary = 0;
+    if (state.levelPrimaryCm > 0 && state.levelPrimaryCm <= (uint16_t)tank_height_cm)
+        heightPrimary = tank_height_cm - state.levelPrimaryCm;
+    levelPrimary["distance_cm"] = state.levelPrimaryCm;
+    levelPrimary["height_cm"] = heightPrimary;
+    levelPrimary["height_pct"] = (heightPrimary * 100) / tank_height_cm;
+    levelPrimary["is_full"] = state.levelPrimaryFull;
+
+    // Secondary sensor (bak mandi)
+    JsonObject levelSecondary = level.createNestedObject("secondary");
+    uint16_t heightSecondary = 0;
+    if (state.levelSecondaryCm > 0 && state.levelSecondaryCm <= (uint16_t)tank_height_secondary_cm)
+        heightSecondary = tank_height_secondary_cm - state.levelSecondaryCm;
+    levelSecondary["distance_cm"] = state.levelSecondaryCm;
+    levelSecondary["height_cm"] = heightSecondary;
+    levelSecondary["height_pct"] = (heightSecondary * 100) / tank_height_secondary_cm;
+    levelSecondary["is_full"] = state.levelSecondaryFull;
 
     JsonObject pump = doc.createNestedObject("pump");
     pump["state"] = state.pumpOn;
@@ -467,18 +630,171 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
             return;
         }
     }
+
+    // config set handling
+    if (incomingTopic.endsWith("/config/set") || incomingTopic.endsWith("/config/delete"))
+    {
+        String base = incomingTopic;
+        int idx = base.lastIndexOf("/");
+        if (idx > 0)
+        {
+            base = base.substring(0, idx);
+        }
+
+        StaticJsonDocument<512> msg;
+        DeserializationError err2 = deserializeJson(msg, payload, length);
+        if (err2)
+        {
+            return;
+        }
+
+        // handle tank_config (primary/tangki)
+        if (msg.containsKey("tank_config"))
+        {
+            JsonObject t = msg["tank_config"].as<JsonObject>();
+            if (t.containsKey("tank_height_cm"))
+                tank_height_cm = t["tank_height_cm"].as<int>();
+            if (t.containsKey("level_min_cm"))
+                level_min_cm = t["level_min_cm"].as<int>();
+            if (t.containsKey("pump_on_threshold"))
+                pump_on_threshold = t["pump_on_threshold"].as<int>();
+            if (t.containsKey("pump_off_threshold"))
+                pump_off_threshold = t["pump_off_threshold"].as<int>();
+            if (t.containsKey("valve_open_threshold"))
+                valve_open_threshold = t["valve_open_threshold"].as<int>();
+            // Accept both field names for compatibility
+            if (t.containsKey("level_full_primary_cm"))
+                level_full_primary_cm = t["level_full_primary_cm"].as<int>();
+            else if (t.containsKey("level_full_cm"))
+                level_full_primary_cm = t["level_full_cm"].as<int>();
+            if (t.containsKey("buzzer_enabled"))
+                buzzer_enabled = t["buzzer_enabled"].as<bool>();
+        }
+
+        // handle secondary_tank_config (bak mandi)
+        if (msg.containsKey("secondary_tank_config"))
+        {
+            JsonObject s = msg["secondary_tank_config"].as<JsonObject>();
+            if (s.containsKey("tank_height_cm"))
+                tank_height_secondary_cm = s["tank_height_cm"].as<int>();
+            if (s.containsKey("level_full_cm"))
+                level_full_secondary_cm = s["level_full_cm"].as<int>();
+        }
+
+        // handle wifi_config
+        bool wifiChanged = false;
+        if (msg.containsKey("wifi_config"))
+        {
+            JsonObject w = msg["wifi_config"].as<JsonObject>();
+            if (w.containsKey("ssid"))
+            {
+                String s = String((const char *)w["ssid"]);
+                if (s != WIFI_SSID)
+                {
+                    WIFI_SSID = s;
+                    wifiChanged = true;
+                }
+            }
+            if (w.containsKey("password"))
+            {
+                String p = String((const char *)w["password"]);
+                if (p != WIFI_PASSWORD)
+                {
+                    WIFI_PASSWORD = p;
+                    wifiChanged = true;
+                }
+            }
+        }
+
+        // persist config
+        DynamicJsonDocument confDoc(1024);
+        JsonObject root = confDoc.to<JsonObject>();
+        JsonObject tankObj = root.createNestedObject("tank_config");
+        tankObj["tank_height_cm"] = tank_height_cm;
+        tankObj["level_min_cm"] = level_min_cm;
+        tankObj["pump_on_threshold"] = pump_on_threshold;
+        tankObj["pump_off_threshold"] = pump_off_threshold;
+        tankObj["valve_open_threshold"] = valve_open_threshold;
+        tankObj["level_full_primary_cm"] = level_full_primary_cm;
+        tankObj["buzzer_enabled"] = buzzer_enabled;
+
+        JsonObject secondaryObj = root.createNestedObject("secondary_tank_config");
+        secondaryObj["tank_height_cm"] = tank_height_secondary_cm;
+        secondaryObj["level_full_cm"] = level_full_secondary_cm;
+
+        JsonObject wifiObj = root.createNestedObject("wifi_config");
+        wifiObj["ssid"] = WIFI_SSID;
+        wifiObj["password"] = WIFI_PASSWORD;
+
+        File fc = LittleFS.open("/config.json", "w");
+        if (fc)
+        {
+            serializeJson(confDoc, fc);
+            fc.close();
+        }
+
+        StaticJsonDocument<256> ack2;
+        ack2["op"] = "config";
+        ack2["status"] = "ok";
+        String out2;
+        serializeJson(ack2, out2);
+        String ackTopic2 = base + "/ack";
+        mqttClient.publish(ackTopic2.c_str(), out2.c_str());
+
+        // if wifi changed, reconnect
+        if (wifiChanged)
+        {
+            // briefly disconnect MQTT and reconnect WiFi
+            mqttClient.disconnect();
+            WiFi.disconnect();
+            delay(500);
+            connectWiFi();
+            mqttClient.setServer(MQTT_HOST, MQTT_PORT);
+        }
+
+        return;
+    }
 }
 
 void connectWiFi()
 {
     WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    WiFi.begin(WIFI_SSID.c_str(), WIFI_PASSWORD.c_str());
 
-    Serial.print("Menghubungkan WiFi");
+    bool startupMode = startupWifiPending;
+    if (!startupMode)
+        Serial.print("Menghubungkan WiFi");
+    if (startupMode)
+    {
+        beepBlocking(1000);
+    }
+    bool ledState = false;
+    unsigned long lastBlinkMs = 0;
     while (WiFi.status() != WL_CONNECTED)
     {
-        delay(500);
-        Serial.print('.');
+        delay(50);
+        if (startupMode)
+        {
+            unsigned long now = millis();
+            if (now - lastBlinkMs >= 250)
+            {
+                lastBlinkMs = now;
+                ledState = !ledState;
+                writeAllLeds(ledState);
+            }
+        }
+        else
+        {
+            delay(450);
+            Serial.print('.');
+        }
+    }
+    if (startupMode)
+    {
+        startupWifiPending = false;
+        writeAllLeds(false);
+        updateLeds();
+        Serial.print("Menghubungkan WiFi");
     }
     Serial.println();
     Serial.print("WiFi tersambung. IP: ");
@@ -516,6 +832,15 @@ void connectMqtt()
         String scheduleDel2 = String("device/") + "+/schedule/delete";
         mqttClient.subscribe(scheduleDel1.c_str());
         mqttClient.subscribe(scheduleDel2.c_str());
+        // subscribe to config updates
+        String configSet1 = String(DEVICE_PREFIX) + "/+/config/set";
+        String configSet2 = String("device/") + "+/config/set";
+        String configDel1 = String(DEVICE_PREFIX) + "/+/config/delete";
+        String configDel2 = String("device/") + "+/config/delete";
+        mqttClient.subscribe(configSet1.c_str());
+        mqttClient.subscribe(configSet2.c_str());
+        mqttClient.subscribe(configDel1.c_str());
+        mqttClient.subscribe(configDel2.c_str());
 
         publishTelemetry();
         updateLeds();
@@ -563,6 +888,48 @@ void setup()
     if (!LittleFS.begin())
     {
         Serial.println("LittleFS mount failed");
+    }
+    // load persisted config if available
+    if (LittleFS.exists("/config.json"))
+    {
+        File f = LittleFS.open("/config.json", "r");
+        if (f)
+        {
+            DynamicJsonDocument conf(1024);
+            DeserializationError err = deserializeJson(conf, f);
+            if (!err)
+            {
+                JsonObject root = conf.as<JsonObject>();
+                if (root.containsKey("tank_config"))
+                {
+                    JsonObject t = root["tank_config"].as<JsonObject>();
+                    tank_height_cm = t["tank_height_cm"] | tank_height_cm;
+                    level_min_cm = t["level_min_cm"] | level_min_cm;
+                    pump_on_threshold = t["pump_on_threshold"] | pump_on_threshold;
+                    pump_off_threshold = t["pump_off_threshold"] | pump_off_threshold;
+                    valve_open_threshold = t["valve_open_threshold"] | valve_open_threshold;
+                    // Accept both field names for compatibility
+                    if (t.containsKey("level_full_primary_cm"))
+                        level_full_primary_cm = t["level_full_primary_cm"];
+                    else if (t.containsKey("level_full_cm"))
+                        level_full_primary_cm = t["level_full_cm"];
+                    buzzer_enabled = t["buzzer_enabled"] | buzzer_enabled;
+                }
+                if (root.containsKey("secondary_tank_config"))
+                {
+                    JsonObject s = root["secondary_tank_config"].as<JsonObject>();
+                    tank_height_secondary_cm = s["tank_height_cm"] | tank_height_secondary_cm;
+                    level_full_secondary_cm = s["level_full_cm"] | level_full_secondary_cm;
+                }
+                if (root.containsKey("wifi_config"))
+                {
+                    JsonObject w = root["wifi_config"].as<JsonObject>();
+                    WIFI_SSID = String((const char *)(w["ssid"] | WIFI_SSID.c_str()));
+                    WIFI_PASSWORD = String((const char *)(w["password"] | WIFI_PASSWORD.c_str()));
+                }
+            }
+            f.close();
+        }
     }
     configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER);
     connectWiFi();
@@ -629,6 +996,13 @@ void markRunToday(const String &id, int today)
     lastRuns.push_back(nr);
 }
 
+uint16_t getSecondaryHeightCm()
+{
+    if (state.levelSecondaryCm > 0 && state.levelSecondaryCm <= (uint16_t)tank_height_secondary_cm)
+        return tank_height_secondary_cm - state.levelSecondaryCm;
+    return 0;
+}
+
 void runSchedules()
 {
     time_t now = time(nullptr);
@@ -690,7 +1064,12 @@ void runSchedules()
                 if (dev == "pump")
                     setPump(true);
                 else if (dev == "valve")
-                    setValve(true);
+                {
+                    uint16_t secondaryHeight = getSecondaryHeightCm();
+                    bool secondaryReadingValid = state.levelSecondaryCm > 0 && state.levelSecondaryCm <= (uint16_t)tank_height_secondary_cm;
+                    if (secondaryReadingValid && secondaryHeight <= (uint16_t)valve_open_threshold)
+                        setValve(true);
+                }
                 else
                     setPump(true);
                 markRunToday(trackIdOn, today);
@@ -741,7 +1120,20 @@ void loop()
         lastPollSensorMs = now;
         pollSensors();
         publishLevelSensor();
+        publishLevelSensor2();
         publishMinimumAlert();
+
+        // Auto-OFF relays if tanks are full (safety check every poll cycle)
+        if (state.pumpOn && state.levelPrimaryFull)
+        {
+            runFullLevelAlarm(true);
+            setPump(false, false);
+        }
+        if (state.valveOn && state.levelSecondaryFull)
+        {
+            runFullLevelAlarm(false);
+            setValve(false, false);
+        }
     }
 
     // Publish telemetry lengkap setiap 10 detik

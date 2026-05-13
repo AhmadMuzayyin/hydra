@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { saveSettingAction } from "@/app/actions";
+import { useMqtt, type MqttConfig } from "@/hooks/use-mqtt";
 
 type SettingsShape = Record<string, unknown>;
 
@@ -39,6 +40,11 @@ type TankDraft = {
   valve_open_threshold: number;
 };
 
+type SecondaryTankDraft = {
+  tank_height_cm: number;
+  level_full_cm: number;
+};
+
 type TelemetryDraft = {
   retention_days: number;
   poll_interval_sec: number;
@@ -56,19 +62,52 @@ export function PengaturanClient({
   const initialWifi = useMemo(() => mergeWifi(settings), [settings]);
   const initialInfo = useMemo(() => mergeInfo(settings), [settings]);
   const initialTank = useMemo(() => mergeTank(settings), [settings]);
+  const initialSecondaryTank = useMemo(
+    () => mergeSecondaryTank(settings),
+    [settings],
+  );
   const initialTelemetry = useMemo(() => mergeTelemetry(settings), [settings]);
 
   const [mqtt, setMqtt] = useState<MqttDraft>(initialMqtt);
   const [wifi, setWifi] = useState<WifiDraft>(initialWifi);
   const [info, setInfo] = useState<InfoDraft>(initialInfo);
   const [tank, setTank] = useState<TankDraft>(initialTank);
+  const [secondaryTank, setSecondaryTank] =
+    useState<SecondaryTankDraft>(initialSecondaryTank);
   const [telemetry, setTelemetry] = useState<TelemetryDraft>(initialTelemetry);
+
+  const mqttClient = useMqtt(initialMqtt as MqttConfig);
 
   const isAdmin = userRole === "admin" || !userRole;
 
   const doSave = async (key: string, value: unknown) => {
     await saveSettingAction({ key, value });
     window.alert("Tersimpan");
+
+    try {
+      if (key === "tank_config") {
+        const payload = JSON.stringify({ op: "config", tank_config: value });
+        mqttClient.publish("tandon/pump/config/set", payload);
+        mqttClient.publish("tandon/valve/config/set", payload);
+      }
+
+      if (key === "secondary_tank_config") {
+        const payload = JSON.stringify({
+          op: "config",
+          secondary_tank_config: value,
+        });
+        mqttClient.publish("tandon/pump/config/set", payload);
+        mqttClient.publish("tandon/valve/config/set", payload);
+      }
+
+      if (key === "wifi_config") {
+        const payload = JSON.stringify({ op: "config", wifi_config: value });
+        mqttClient.publish("tandon/pump/config/set", payload);
+        mqttClient.publish("tandon/valve/config/set", payload);
+      }
+    } catch {
+      // ignore publish errors on client-side
+    }
   };
 
   return (
@@ -102,49 +141,7 @@ export function PengaturanClient({
         ) : null}
       </Section>
 
-      <Section icon={<Radio className="h-5 w-5" />} title="MQTT Broker">
-        <Field
-          label="Host"
-          value={mqtt.host}
-          onChange={(value) => setMqtt({ ...mqtt, host: value })}
-          disabled={!isAdmin}
-        />
-        <div className="grid grid-cols-2 gap-3">
-          <Field
-            label="Port"
-            value={String(mqtt.port)}
-            onChange={(value) => setMqtt({ ...mqtt, port: Number(value) || 0 })}
-            disabled={!isAdmin}
-          />
-          <Field
-            label="Path"
-            value={mqtt.path}
-            onChange={(value) => setMqtt({ ...mqtt, path: value })}
-            disabled={!isAdmin}
-          />
-        </div>
-        <Field
-          label="Username"
-          value={mqtt.username}
-          onChange={(value) => setMqtt({ ...mqtt, username: value })}
-          disabled={!isAdmin}
-        />
-        <Field
-          label="Password"
-          value={mqtt.password}
-          onChange={(value) => setMqtt({ ...mqtt, password: value })}
-          disabled={!isAdmin}
-          type="password"
-        />
-        {isAdmin ? (
-          <Button
-            onClick={() => doSave("mqtt_config", mqtt)}
-            className="mt-2 w-full"
-          >
-            Simpan MQTT
-          </Button>
-        ) : null}
-      </Section>
+      {/* MQTT Broker section removed per request */}
 
       <Section icon={<Wifi className="h-5 w-5" />} title="WiFi">
         <Field
@@ -247,36 +244,27 @@ export function PengaturanClient({
         ) : null}
       </Section>
 
-      <Section icon={<Radio className="h-5 w-5" />} title="Telemetry">
-        <div className="grid grid-cols-3 gap-3">
+      <Section icon={<Cpu className="h-5 w-5" />} title="Bak Mandi">
+        <div className="grid grid-cols-2 gap-3">
           <Field
-            label="Retention (hari)"
-            value={String(telemetry.retention_days)}
+            label="Tinggi Bak (cm)"
+            value={String(secondaryTank.tank_height_cm)}
             onChange={(value) =>
-              setTelemetry({ ...telemetry, retention_days: Number(value) || 0 })
-            }
-            disabled={!isAdmin}
-            type="number"
-          />
-          <Field
-            label="Polling (detik)"
-            value={String(telemetry.poll_interval_sec)}
-            onChange={(value) =>
-              setTelemetry({
-                ...telemetry,
-                poll_interval_sec: Number(value) || 0,
+              setSecondaryTank({
+                ...secondaryTank,
+                tank_height_cm: Number(value) || 0,
               })
             }
             disabled={!isAdmin}
             type="number"
           />
           <Field
-            label="Telemetry (detik)"
-            value={String(telemetry.telemetry_interval_sec)}
+            label="Level Penuh (cm)"
+            value={String(secondaryTank.level_full_cm)}
             onChange={(value) =>
-              setTelemetry({
-                ...telemetry,
-                telemetry_interval_sec: Number(value) || 0,
+              setSecondaryTank({
+                ...secondaryTank,
+                level_full_cm: Number(value) || 0,
               })
             }
             disabled={!isAdmin}
@@ -285,13 +273,15 @@ export function PengaturanClient({
         </div>
         {isAdmin ? (
           <Button
-            onClick={() => doSave("telemetry_config", telemetry)}
+            onClick={() => doSave("secondary_tank_config", secondaryTank)}
             className="mt-2 w-full"
           >
-            Simpan Telemetry
+            Simpan Bak Mandi
           </Button>
         ) : null}
       </Section>
+
+      {/* Telemetry section removed per request */}
     </MobileLayout>
   );
 }
@@ -333,6 +323,14 @@ function mergeTank(settings: SettingsShape): TankDraft {
     pump_on_threshold: Number(source.pump_on_threshold ?? 50) || 50,
     pump_off_threshold: Number(source.pump_off_threshold ?? 180) || 180,
     valve_open_threshold: Number(source.valve_open_threshold ?? 190) || 190,
+  };
+}
+
+function mergeSecondaryTank(settings: SettingsShape): SecondaryTankDraft {
+  const source = coerceRecord(settings.secondary_tank_config);
+  return {
+    tank_height_cm: Number(source.tank_height_cm ?? 100) || 100,
+    level_full_cm: Number(source.level_full_cm ?? 90) || 90,
   };
 }
 
