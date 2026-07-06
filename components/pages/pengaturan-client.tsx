@@ -244,7 +244,7 @@ export function PengaturanClient({
         ) : null}
       </Section>
 
-      <Section icon={<Cpu className="h-5 w-5" />} title="Bak Mandi">
+      {/* <Section icon={<Cpu className="h-5 w-5" />} title="Bak Mandi">
         <div className="grid grid-cols-2 gap-3">
           <Field
             label="Tinggi Bak (cm)"
@@ -279,7 +279,7 @@ export function PengaturanClient({
             Simpan Bak Mandi
           </Button>
         ) : null}
-      </Section>
+      </Section> */}
 
       {/* Telemetry section removed per request */}
     </MobileLayout>
