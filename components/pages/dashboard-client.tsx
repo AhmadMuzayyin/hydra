@@ -173,7 +173,7 @@ export function DashboardClient({
           label="Level Tangki %"
           value={`${Number(levelPct).toFixed(0)}%`}
         />
-        <StatCard
+        {/* <StatCard
           icon={<Waves className="h-5 w-5" />}
           label="Level Bak (cm)"
           value={`${Number(levelSecondaryCm).toFixed(0)} cm`}
@@ -182,7 +182,7 @@ export function DashboardClient({
           icon={<Activity className="h-5 w-5" />}
           label="Level Bak %"
           value={`${Number(levelSecondaryPct).toFixed(0)}%`}
-        />
+        /> */}
       </div>
 
       <div className="mb-4">
