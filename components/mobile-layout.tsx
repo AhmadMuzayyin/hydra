@@ -34,7 +34,7 @@ export function MobileLayout({
         <div className="mx-auto flex max-w-2xl items-center justify-between gap-4">
           <div>
             <h2 className="text-xl uppercase tracking-[0.28em] font-bold">
-              Hydra
+              SMAL
             </h2>
             <p className="text-xs leading-tight">
               {title}

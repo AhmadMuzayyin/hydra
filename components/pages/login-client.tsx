@@ -19,8 +19,8 @@ export function LoginClient() {
           <div className="mb-3 grid h-16 w-16 place-items-center rounded-2xl bg-[var(--gradient-primary)] text-primary-foreground shadow-[var(--shadow-card)]">
             <Droplets className="h-8 w-8" />
           </div>
-          <h1 className="text-2xl font-bold">Hydra</h1>
-          <p className="text-sm text-muted-foreground">Hybrid Dynamic Remote Aqua-monitoring</p>
+          <h1 className="text-2xl font-bold">SMAL</h1>
+          <p className="text-sm text-muted-foreground">Sistem Monitoring Air Lubangsa</p>
         </div>
 
         <form action={formAction} className="space-y-4">

@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Hydra Next",
-  description: "Monitoring dan kontrol tandon air Hydra",
+  title: "Smal Next",
+  description: "Monitoring dan kontrol tandon air Smal",
 };
 
 export default function RootLayout({
