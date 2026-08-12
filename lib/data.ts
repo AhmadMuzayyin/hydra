@@ -4,6 +4,14 @@ import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import type { Json } from "@/integrations/supabase/types";
 import { requireAdmin, requireUser } from "./auth";
 
+const DEFAULT_MQTT_CONFIG = {
+  host: "c6a0495a63b84e1eaa7c67371b975437.s1.eu.hivemq.cloud",
+  port: 8883,
+  path: "/mqtt",
+  username: "ustad.dev",
+  password: "Mocachino18@",
+} as const;
+
 export async function listDevices() {
   await requireUser();
   const { data } = await supabaseAdmin
@@ -90,6 +98,11 @@ export async function getSettings() {
   for (const row of data ?? []) {
     out[row.key] = row.value;
   }
+
+  if (!out.mqtt_config && !out.mqtt) {
+    out.mqtt_config = DEFAULT_MQTT_CONFIG as Json;
+  }
+
   return out;
 }
 

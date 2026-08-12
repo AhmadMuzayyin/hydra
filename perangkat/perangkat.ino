@@ -10,7 +10,7 @@
 String WIFI_SSID = "USTDEV";
 String WIFI_PASSWORD = "coba12345";
 
-const char *MQTT_HOST = "d8e662e1.ala.asia-southeast1.emqxsl.com";
+const char *MQTT_HOST = "c6a0495a63b84e1eaa7c67371b975437.s1.eu.hivemq.cloud";
 const uint16_t MQTT_PORT = 8883;
 const char *MQTT_USERNAME = "ustad.dev";
 const char *MQTT_PASSWORD = "Mocachino18@";
@@ -291,6 +291,79 @@ void pollSensors()
         state.levelSecondaryFull = (heightSecondary >= (uint16_t)level_full_secondary_cm);
         // Keep levelMinTriggered for backward compat: trigger on low level in secondary
         state.levelMinTriggered = (heightSecondary > 0 && heightSecondary < (uint16_t)level_min_cm);
+    }
+}
+
+// ===== AUTONOMOUS SENSOR-BASED CONTROL =====
+// Kontrol mandiri pompa & valve berdasarkan data sensor.
+// Berjalan SETIAP kali sensor dibaca, TIDAK bergantung pada MQTT/internet.
+//
+// Primary tank (tangki) — dikontrol oleh POMPA:
+//   - Pompa ON  : tinggi air <= pump_on_threshold  (tangki perlu diisi)
+//   - Pompa OFF : tinggi air >= pump_off_threshold  (tangki sudah penuh)
+//
+// Secondary tank (bak mandi) — dikontrol oleh VALVE:
+//   - Valve ON  : tinggi air <= level_min_cm        (bak mandi kekurangan air)
+//   - Valve OFF : tinggi air >= level_full_secondary_cm (bak mandi penuh)
+void runAutoControl()
+{
+    // --- PRIMARY TANK: kontrol pompa ---
+    bool primaryValid = state.levelPrimaryCm > 0 &&
+                        state.levelPrimaryCm <= (uint16_t)tank_height_cm;
+    if (primaryValid)
+    {
+        uint16_t heightPrimary = tank_height_cm - state.levelPrimaryCm;
+
+        if (!state.pumpOn && heightPrimary <= (uint16_t)pump_on_threshold)
+        {
+            // Tangki kurang dari batas bawah -> nyalakan pompa
+            Serial.print("[AUTO] Pompa ON (tinggi=");
+            Serial.print(heightPrimary);
+            Serial.println("cm, di bawah batas bawah)");
+            setPump(true);
+        }
+        else if (state.pumpOn && heightPrimary >= (uint16_t)pump_off_threshold)
+        {
+            // Tangki mencapai batas atas -> matikan pompa
+            Serial.print("[AUTO] Pompa OFF (tinggi=");
+            Serial.print(heightPrimary);
+            Serial.println("cm, mencapai batas atas)");
+            if (buzzer_enabled) runFullLevelAlarm(true);
+            setPump(false, false);
+        }
+        else if (state.pumpOn && state.levelPrimaryFull)
+        {
+            // Safety override: tangki 100% penuh -> matikan pompa
+            Serial.println("[AUTO] Pompa OFF (safety: tangki penuh 100%)");
+            if (buzzer_enabled) runFullLevelAlarm(true);
+            setPump(false, false);
+        }
+    }
+
+    // --- SECONDARY TANK: kontrol valve ---
+    bool secondaryValid = state.levelSecondaryCm > 0 &&
+                          state.levelSecondaryCm <= (uint16_t)tank_height_secondary_cm;
+    if (secondaryValid)
+    {
+        uint16_t heightSecondary = tank_height_secondary_cm - state.levelSecondaryCm;
+
+        if (!state.valveOn && heightSecondary <= (uint16_t)level_min_cm)
+        {
+            // Bak mandi di bawah batas minimum -> buka valve
+            Serial.print("[AUTO] Valve ON (tinggi=");
+            Serial.print(heightSecondary);
+            Serial.println("cm, bak mandi kekurangan air)");
+            setValve(true);
+        }
+        else if (state.valveOn && state.levelSecondaryFull)
+        {
+            // Bak mandi penuh -> tutup valve
+            Serial.print("[AUTO] Valve OFF (tinggi=");
+            Serial.print(heightSecondary);
+            Serial.println("cm, bak mandi penuh)");
+            if (buzzer_enabled) runFullLevelAlarm(false);
+            setValve(false, false);
+        }
     }
 }
 
@@ -801,6 +874,30 @@ void connectWiFi()
     Serial.println(WiFi.localIP());
 }
 
+void waitForNtp()
+{
+    Serial.print("[NTP] Menunggu sinkronisasi waktu");
+    time_t now = time(nullptr);
+    int attempts = 0;
+    while (now < 1000000000UL && attempts < 40) // wait max 20 detik
+    {
+        delay(500);
+        Serial.print('.');
+        now = time(nullptr);
+        attempts++;
+    }
+    Serial.println();
+    if (now >= 1000000000UL)
+    {
+        Serial.print("[NTP] Sinkron: ");
+        Serial.println(ctime(&now));
+    }
+    else
+    {
+        Serial.println("[NTP] Gagal sinkron, TLS mungkin gagal!");
+    }
+}
+
 void connectMqtt()
 {
     if (mqttClient.connected())
@@ -933,10 +1030,17 @@ void setup()
     }
     configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER);
     connectWiFi();
+    waitForNtp(); // pastikan jam sudah sinkron sebelum TLS handshake
 
+    // HiveMQ Cloud requires TLS. setInsecure() skips cert verification
+    // but TLS handshake still runs. setBufferSizes reduces BearSSL heap usage.
+    // setMFLNSize(512) tells the server to use smaller TLS fragments (saves ~11KB RAM).
     secureClient.setInsecure();
+    secureClient.setBufferSizes(512, 512); // rx=512, tx=512 - saves ~11KB vs default 16KB
     mqttClient.setServer(MQTT_HOST, MQTT_PORT);
-    mqttClient.setBufferSize(512);
+    mqttClient.setBufferSize(1024);
+    mqttClient.setKeepAlive(60);
+    mqttClient.setSocketTimeout(15);
     mqttClient.setCallback(mqttCallback);
 
     Serial.println("[SETUP] Selesai!");
@@ -1114,26 +1218,19 @@ void loop()
 
     unsigned long now = millis();
 
-    // Poll sensors setiap 5 detik
+    // Poll sensors & jalankan kontrol mandiri
     if (now - lastPollSensorMs >= POLL_SENSOR_INTERVAL_MS)
     {
         lastPollSensorMs = now;
         pollSensors();
+
+        // Kontrol relay berdasarkan sensor — tidak bergantung MQTT/internet
+        runAutoControl();
+
+        // Publish data sensor ke MQTT (hanya jika terhubung)
         publishLevelSensor();
         publishLevelSensor2();
         publishMinimumAlert();
-
-        // Auto-OFF relays if tanks are full (safety check every poll cycle)
-        if (state.pumpOn && state.levelPrimaryFull)
-        {
-            runFullLevelAlarm(true);
-            setPump(false, false);
-        }
-        if (state.valveOn && state.levelSecondaryFull)
-        {
-            runFullLevelAlarm(false);
-            setValve(false, false);
-        }
     }
 
     // Publish telemetry lengkap setiap 10 detik
